@@ -11,24 +11,22 @@ from playwright.sync_api import sync_playwright
 # ================= CONFIGURACIÓN =================
 URL_LOGIN = "https://eventossistema.com.mx/login.html"
 URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
-CHECK_INTERVAL = 90 # Mantener en 90s para no saturar
+CHECK_INTERVAL = 90 
 TZ = pytz.timezone("America/Mexico_City")
 
-# Variables de Entorno (Ya configuradas en Render)
 USER = os.getenv("WEB_USER")
 PASS = os.getenv("WEB_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- FILTROS MAESTROS ACTUALIZADOS ---
 EVENTOS_VIP = ["SYSTEM OF A DOWN", "SOAD", "ACDC", "AC/DC", "BTS"]
-EVENTO_PRUEBA = "SOFTBOL DIABLOS 2026 SERIE DE LA REINA" # Nombre exacto
+PUESTOS_VIP = ["SEGURIDAD", "LOCAL CREW"]
 
 app = Flask(__name__)
 
 @app.route("/")
 def home(): 
-    return f"Bot Cazador Madian (Modo Prueba Diablos) Activo - {datetime.now(TZ).strftime('%H:%M:%S')}"
+    return f"Bot Madian V3.1 - Activo {datetime.now(TZ).strftime('%H:%M:%S')}"
 
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -38,121 +36,114 @@ def send(msg):
     except: pass
 
 def extraer_datos_tabla(html_content):
-    info = {"puesto": "", "inicio": "", "lugar": "", "turnos": "0"}
+    info = {"puesto": "", "inicio": "", "turnos": "0", "minutos_totales": 0}
     try:
-        # Extraer Lugar
-        lugar_m = re.search(r'LUGAR</td><td.*?>(.*?)</td>', html_content)
-        if lugar_m: info['lugar'] = lugar_m.group(1).strip().upper()
-        # Extraer Puesto
         puesto_m = re.search(r'PUESTO</td><td.*?>(.*?)</td>', html_content)
         if puesto_m: info['puesto'] = puesto_m.group(1).strip().upper()
-        # Extraer Turnos e Inicio
+        
         horario_match = re.search(r'HORARIO</td><td.*?>(.*?)</td>', html_content, re.DOTALL)
         if horario_match:
             texto_h = horario_match.group(1)
-            fecha_m = re.search(r'(\d{2}/\d{2}/\d{4} \d{2}:\d{2})', texto_h)
-            if fecha_m: info['inicio'] = fecha_m.group(1)
             turnos_m = re.search(r'TURNOS\s*(\d+\.?\d*)', texto_h, re.IGNORECASE)
             if turnos_m: info['turnos'] = turnos_m.group(1)
-    except Exception as e:
-        print(f"Error extrayendo tabla: {e}")
+            
+            # Extraer hora para validar rango (12:30 - 14:30)
+            hora_m = re.search(r'(\d{2}):(\d{2})', texto_h)
+            if hora_m:
+                h, m = int(hora_m.group(1)), int(hora_m.group(2))
+                info['minutos_totales'] = (h * 60) + m
+    except: pass
     return info
 
 def analizar_cazador(info, titulo_card):
     titulo = titulo_card.upper()
     puesto = info['puesto']
     turnos = info['turnos']
+    mins = info.get('minutos_totales', 0)
     
-    # NUEVO: Detección de Preasignado
-    es_preasignado = "PREASIGNADO" in titulo
+    # Rango: 12:30 (750 mins) a 14:30 (870 mins)
+    en_rango_horario = 750 <= mins <= 870
 
-    # --- LÓGICA DE PRUEBA: SOFTBOL DIABLOS ---
-    if EVENTO_PRUEBA.upper() in titulo:
-        if es_preasignado and puesto == "LOCAL CREW":
-            return True, "PRUEBA DIABLOS: Criterios Perfectos", True # AUTO-CONFIRMAR
-        else:
-            return True, f"Diablos Detectado, pero NO PREASIGNADO o Puesto Incorrecto ({puesto})", False
+    # 1. CASO DIABLOS (PRÁCTICA)
+    if "SOFTBOL DIABLOS" in titulo:
+        if "PREASIGNADO" in titulo and puesto == "LOCAL CREW":
+            return True, "DIABLOS PREASIGNADO (Auto)", True
+        return True, f"Diablos (Manual): {puesto}", False
 
-    # --- LÓGICA VIP NORMAL (ACDC/SOAD/BTS) ---
+    # 2. CASO VIP (SOAD, ACDC, BTS)
     es_vip = any(vip in titulo for vip in EVENTOS_VIP)
     if es_vip:
         if "RESGUARDO" in titulo:
-            return True, "Es un RESGUARDO VIP (Manual)", False
+            return True, "VIP es RESGUARDO (Manual)", False
         
-        # Filtro estricto para Estadio GNP
-        if puesto == "SEGURIDAD" and turnos == "1.5":
-            return True, "VIP PERFECTO (GNP)", True # AUTO-CONFIRMAR
+        # Filtro estricto: Puesto + 1.5 Turnos + Horario Concierto
+        if puesto in PUESTOS_VIP and turnos == "1.5":
+            if en_rango_horario:
+                return True, "VIP PERFECTO (Auto)", True
+            else:
+                return True, f"VIP fuera de horario ({mins//60}:{mins%60:02d})", False
         
-        return True, f"VIP Detectado, pero Puesto/Turno no coincide ({puesto} - {turnos})", False
-    
-    return False, "No es de interés", False
+        return True, f"VIP Manual: {puesto} / {turnos} turnos", False
+
+    return True, "Evento Nuevo (No VIP)", False
 
 def bot_worker():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        context = browser.new_context()
         page = context.new_page()
         logged = False
 
         while True:
             try:
-                now_mx = datetime.now(TZ)
-                
                 if not logged:
-                    print(f"[{now_mx}] Intentando Login...")
-                    page.goto(URL_LOGIN, wait_until="networkidle")
-                    page.wait_for_timeout(3000)
+                    page.goto(URL_LOGIN)
                     page.fill("input[name='usuario']", USER)
                     page.fill("input[name='password']", PASS)
                     page.click("button[type='submit']")
-                    page.wait_for_timeout(6000)
+                    page.wait_for_timeout(5000)
                     logged = True
-                    print(f"[{now_mx}] Login Exitoso.")
 
-                page.goto(URL_EVENTS, wait_until="domcontentloaded")
-                page.wait_for_timeout(3000) # Espera extra para render de tablas
+                page.goto(URL_EVENTS, wait_until="networkidle")
+                
+                # Verificar si el div de disponibles dice "No hay eventos"
+                disponibles_container = page.query_selector("#div_eventos_disponibles")
+                if disponibles_container and "No hay eventos disponibles" in disponibles_container.inner_text():
+                    print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sin eventos.")
+                else:
+                    # Buscamos todas las cards dentro del div específico de disponibles
+                    cards = disponibles_container.query_selector_all(".card.border") if disponibles_container else []
 
-                cards = page.query_selector_all(".card.border")
-                eventos_vistos = []
+                    for card in cards:
+                        titulo_elem = card.query_selector("h6 a")
+                        if not titulo_elem: continue
+                        titulo_texto = titulo_elem.inner_text().strip()
 
-                for card in cards:
-                    titulo_elem = card.query_selector("h6 a")
-                    if not titulo_elem: continue
-                    titulo_texto = titulo_elem.inner_text().strip()
-                    
-                    eventos_vistos.append(titulo_texto)
-
-                    # Desplegar para ver tabla (Necesario para analizar)
-                    try:
+                        # Click para ver detalles
                         titulo_elem.click()
                         page.wait_for_timeout(1000)
-                        tabla_elem = card.query_selector(".table-responsive")
-                        if not tabla_elem: continue
+                        tabla = card.query_selector(".table-responsive")
                         
-                        info = extraer_datos_tabla(tabla_elem.inner_html())
-                        interesa, motivo, auto_confirmar = analizar_cazador(info, titulo_texto)
+                        if tabla:
+                            info = extraer_datos_tabla(tabla.inner_html())
+                            interesa, motivo, auto = analizar_cazador(info, titulo_texto)
 
-                        if interesa:
-                            if auto_confirmar:
-                                btn = card.query_selector("button:has-text('CONFIRMAR')")
-                                if btn:
-                                    #btn.click() # COMENTADO PARA NO CONFIRMAR REALMENTE EN LA PRIMERA VUELTA
-                                    #page.wait_for_timeout(3000)
-                                    send(f"🎯 *MADIAN: (SIMULACIÓN DE ÉXITO)*\n📌 {titulo_texto}\n👤 {info['puesto']}\n📊 Turnos: {info['turnos']}\n✅ Criterios perfectos.")
+                            if motivo == "Evento Nuevo (No VIP)":
+                                send(f"🔔 *EVENTO DISPONIBLE:* {titulo_texto}")
+                            elif interesa:
+                                if auto:
+                                    btn = card.query_selector("button:has-text('CONFIRMAR')")
+                                    if btn:
+                                        btn.click()
+                                        page.wait_for_timeout(4000)
+                                        send(f"🎯 *CONFIRMADO AUTOMÁTICO*\n📌 {titulo_texto}\n👤 {info['puesto']}\n⏰ {info['turnos']} turnos")
+                                    else:
+                                        send(f"⚠️ *ERROR:* Criterios OK pero botón no hallado en {titulo_texto}")
                                 else:
-                                    send(f"⚠️ *MADIAN:* Criterios OK pero no hallé el botón en {titulo_texto}")
-                            else:
-                                # VIP/Prueba Detectado pero algo no cuadra (ej. es Local Crew o no es 1.5), enviamos aviso
-                                send(f"🔔 *AVISO DE REVISIÓN:* {titulo_texto}\n❌ {motivo}\n📍 {info['lugar']}")
-                    except:
-                        pass # Error al hacer clic en una card específica
-
-                # Notificación de escaneo silencioso (solo si quieres, la quité para no spam)
-                print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Escaneado completado. Vistos: {len(eventos_vistos)}")
+                                    send(f"⚠️ *REVISIÓN MANUAL:* {titulo_texto}\n❌ {motivo}")
 
             except Exception as e:
-                print(f"Error Crítico: {e}"); logged = False; time.sleep(30)
-            
+                print(f"Error: {e}"); logged = False; time.sleep(30)
             time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
