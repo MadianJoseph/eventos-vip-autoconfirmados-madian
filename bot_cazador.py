@@ -14,13 +14,12 @@ URL_EVENTS = "https://eventossistema.com.mx/confirmaciones/default.html"
 CHECK_INTERVAL = 90 
 TZ = pytz.timezone("America/Mexico_City")
 
-# Variables de Entorno en Render
 USER = os.getenv("WEB_USER")
 PASS = os.getenv("WEB_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Filtros Maestros
+# Solo tus eventos de alta prioridad
 EVENTOS_VIP = ["SYSTEM OF A DOWN", "SOAD", "ACDC", "AC/DC", "BTS"]
 PUESTOS_ACEPTADOS = ["SEGURIDAD", "LOCAL CREW"]
 
@@ -28,7 +27,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home(): 
-    return f"Bot Madian V3.3 (Detección por Badge) - {datetime.now(TZ).strftime('%H:%M:%S')}"
+    return f"Bot Cazador Madian (Modo VIP) - {datetime.now(TZ).strftime('%H:%M:%S')}"
 
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -56,7 +55,7 @@ def extraer_datos_tabla(html_content):
     except: pass
     return info
 
-def analizar_cazador(info, titulo_card, tiene_badge_preasignado):
+def analizar_cazador(info, titulo_card):
     titulo = titulo_card.upper()
     puesto = info['puesto']
     turnos = info['turnos']
@@ -65,25 +64,22 @@ def analizar_cazador(info, titulo_card, tiene_badge_preasignado):
     # Rango Concierto: 12:30 (750m) a 14:30 (870m)
     rango_concierto = 750 <= mins <= 870
 
-    # 1. REGLA TEMPORAL: DIABLOS (Basado en el Badge visual)
-    if "SOFTBOL DIABLOS" in titulo:
-        if tiene_badge_preasignado and puesto in PUESTOS_ACEPTADOS:
-            return True, "DIABLOS PREASIGNADO (Auto)", True
-        return True, f"Diablos Manual: {puesto} | Preasignado: {tiene_badge_preasignado}", False
-
-    # 2. REGLA VIP (SOAD, ACDC, BTS)
+    # REGLA VIP (SOAD, ACDC, BTS)
     es_vip = any(vip in titulo for vip in EVENTOS_VIP)
     if es_vip:
         if "RESGUARDO" in titulo:
-            return True, "VIP es RESGUARDO (Manual)", False
+            return True, "VIP es RESGUARDO (Revisión Manual)", False
         
+        # Auto-confirmación estricta
         if puesto in PUESTOS_ACEPTADOS and turnos == "1.5":
             if rango_concierto:
                 return True, "VIP PERFECTO (Auto)", True
             else:
-                return True, f"VIP Manual: Horario fuera de rango ({mins//60}:{mins%60:02d})", False
+                return True, f"VIP fuera de horario ({mins//60}:{mins%60:02d})", False
+        
         return True, f"VIP Manual: {puesto} / {turnos} turnos", False
 
+    # OTROS EVENTOS
     return True, "Evento Nuevo (No VIP)", False
 
 def bot_worker():
@@ -105,7 +101,6 @@ def bot_worker():
 
                 page.goto(URL_EVENTS, wait_until="networkidle")
                 
-                # Freno: Solo div de disponibles
                 disponibles = page.query_selector("#div_eventos_disponibles")
                 if disponibles and "No hay eventos disponibles" in disponibles.inner_text():
                     print(f"[{datetime.now(TZ).strftime('%H:%M:%S')}] Sin eventos.")
@@ -113,24 +108,17 @@ def bot_worker():
                     cards = disponibles.query_selector_all(".card.border") if disponibles else []
 
                     for card in cards:
-                        # 1. Detección del Badge de PREASIGNADO
-                        badge = card.query_selector("span.badge.bg-warning")
-                        es_preasignado = False
-                        if badge and "PREASIGNADO" in badge.inner_text().upper():
-                            es_preasignado = True
-
                         titulo_elem = card.query_selector("h6 a")
                         if not titulo_elem: continue
                         titulo_texto = titulo_elem.inner_text().strip()
 
-                        # 2. Abrir detalles
                         titulo_elem.click()
                         page.wait_for_timeout(1000)
                         tabla = card.query_selector(".table-responsive")
                         
                         if tabla:
                             info = extraer_datos_tabla(tabla.inner_html())
-                            interesa, motivo, auto = analizar_cazador(info, titulo_texto, es_preasignado)
+                            interesa, motivo, auto = analizar_cazador(info, titulo_texto)
 
                             if motivo == "Evento Nuevo (No VIP)":
                                 send(f"🔔 *EVENTO DISPONIBLE:* {titulo_texto}")
@@ -140,9 +128,9 @@ def bot_worker():
                                     if btn:
                                         btn.click()
                                         page.wait_for_timeout(4000)
-                                        send(f"🎯 *MADIAN: CONFIRMADO EXITOSAMENTE*\n📌 {titulo_texto}\n👤 {info['puesto']}\n✅ Detección por Badge OK.")
+                                        send(f"🎯 *MADIAN: VIP CONFIRMADO*\n📌 {titulo_texto}\n👤 {info['puesto']}\n📊 Turnos: {info['turnos']}")
                                     else:
-                                        send(f"⚠️ *ERROR:* Criterios OK pero no vi el botón en {titulo_texto}")
+                                        send(f"⚠️ *ERROR:* VIP OK pero botón no hallado en {titulo_texto}")
                                 else:
                                     send(f"⚠️ *REVISIÓN MANUAL:* {titulo_texto}\n❌ {motivo}")
 
