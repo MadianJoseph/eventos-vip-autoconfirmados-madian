@@ -19,14 +19,18 @@ PASS = os.getenv("WEB_PASS")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-EVENTOS_VIP = ["SYSTEM OF A DOWN", "SOAD", "ACDC", "AC/DC", "BTS"]
+# Nombre específico actualizado para AC/DC 2026
+EVENTOS_VIP = ["SYSTEM OF A DOWN", "SOAD", "AC DC 2026 SEGURIDAD", "ACDC", "AC/DC", "BTS"]
 PUESTOS_ACEPTADOS = ["SEGURIDAD", "LOCAL CREW"]
+
+# Inmuebles bloqueados (Fútbol/No interés)
+INMUEBLES_BLOQUEADOS = ["ESTADIO CIUDAD DE LOS DEPORTES", "ESTADIO AZTECA", "AZTECA"]
 
 app = Flask(__name__)
 
 @app.route("/")
 def home(): 
-    return f"Bot Rastreador VIP - Online - {datetime.now(TZ).strftime('%H:%M:%S')}"
+    return f"Bot VIP AC/DC 2026 - Online - {datetime.now(TZ).strftime('%H:%M:%S')}"
 
 def send(msg):
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -36,10 +40,13 @@ def send(msg):
     except: pass
 
 def extraer_datos_tabla(html_content):
-    info = {"puesto": "", "turnos": "0", "mins_entrada": 0}
+    info = {"puesto": "", "turnos": "0", "mins_entrada": 0, "lugar": ""}
     try:
         puesto_m = re.search(r'PUESTO</td><td.*?>(.*?)</td>', html_content)
         if puesto_m: info['puesto'] = puesto_m.group(1).strip().upper()
+
+        lugar_m = re.search(r'LUGAR</td><td.*?>(.*?)</td>', html_content)
+        if lugar_m: info['lugar'] = lugar_m.group(1).strip().upper()
         
         horario_match = re.search(r'HORARIO</td><td.*?>(.*?)</td>', html_content, re.DOTALL)
         if horario_match:
@@ -54,29 +61,41 @@ def extraer_datos_tabla(html_content):
     except: pass
     return info
 
-def analizar_cazador(info, titulo_card, tiene_badge_preasignado):
+def analizar_cazador(info, titulo_card):
     titulo = titulo_card.upper()
     puesto = info['puesto']
     turnos = info['turnos']
     mins = info.get('mins_entrada', 0)
+    lugar = info['lugar']
     
-    # Rango Concierto: 12:30 a 14:30 (750m a 870m)
-    rango_concierto = 750 <= mins <= 870
+    # --- FILTRO DE EXCLUSIÓN (Estadios No deseados) ---
+    for bloqueado in INMUEBLES_BLOQUEADOS:
+        if bloqueado in titulo or bloqueado in lugar:
+            return False, "Bloqueado", False
 
-    # 1. REGLA VIP (SOAD, ACDC, BTS) -> AUTO-CONFIRMAR
     es_vip = any(vip in titulo for vip in EVENTOS_VIP)
+    
     if es_vip:
         if "RESGUARDO" in titulo:
-            return True, "VIP es RESGUARDO (Manual)", False
+            return True, "VIP RESGUARDO (Manual)", False
         
-        # Filtros de auto-confirmación: Puesto + Turnos + Horario
-        if puesto in PUESTOS_ACEPTADOS and turnos == "1.5" and rango_concierto:
+        # AC/DC - Filtro por nombre específico y horarios actualizados
+        if "AC DC 2026" in titulo or "ACDC" in titulo or "AC/DC" in titulo:
+            # Turno 1.0 (15:30 = 930 mins)
+            if turnos == "1" and mins == 930 and puesto in PUESTOS_ACEPTADOS:
+                return True, "AC/DC 1T (Auto)", True
+            # Turno 1.5 (13:30 = 810 mins)
+            if turnos == "1.5" and mins == 810 and puesto in PUESTOS_ACEPTADOS:
+                return True, "AC/DC 1.5T (Auto)", True
+
+        # SOAD / BTS / Otros VIP
+        rango_estandar = 750 <= mins <= 870
+        if puesto in PUESTOS_ACEPTADOS and turnos == "1.5" and rango_estandar:
             return True, "VIP PERFECTO (Auto)", True
         
-        return True, f"REVISIÓN MANUAL VIP: {titulo} ({puesto}/{turnos}T)", False
+        return True, f"REVISIÓN VIP: {titulo}", False
 
-    # 2. OTROS EVENTOS (Incluyendo Diablos ahora) -> SOLO NOTIFICAR
-    return True, "Evento Nuevo Disponible", False
+    return True, "Disponible", False
 
 def run_once():
     try:
@@ -85,54 +104,51 @@ def run_once():
             context = browser.new_context(user_agent="Mozilla/5.0...")
             page = context.new_page()
 
-            # Proceso de Login
             page.goto(URL_LOGIN, wait_until="networkidle", timeout=60000)
             page.fill("input[name='usuario']", USER)
             page.fill("input[name='password']", PASS)
             page.click("button[type='submit']")
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(4000)
 
-            # Ir a sección de confirmaciones
             page.goto(URL_EVENTS, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(3000)
             
-            # Rastreo global de tarjetas
             cards = page.query_selector_all(".card.border")
+            eventos_disponibles = []
             
             for card in cards:
-                # Si la tarjeta ya está confirmada, la ignoramos
-                is_confirmed = card.evaluate("(node) => node.closest('#div_eventos_confirmados') !== null")
-                if is_confirmed: continue
-
-                # Detectar Badge Amarillo (Preasignado)
-                badge = card.query_selector("span.badge.bg-warning")
-                es_preasignado = bool(badge and "PREASIGNADO" in badge.inner_text().upper())
+                if card.evaluate("(node) => node.closest('#div_eventos_confirmados') !== null"):
+                    continue
 
                 titulo_elem = card.query_selector("h6 a")
                 if not titulo_elem: continue
                 titulo_texto = titulo_elem.inner_text().strip()
 
-                # Abrir detalles para leer la tabla
                 titulo_elem.click()
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(1200)
                 tabla = card.query_selector(".table-responsive")
                 
                 if tabla:
                     info = extraer_datos_tabla(tabla.inner_html())
-                    interesa, motivo, auto = analizar_cazador(info, titulo_texto, es_preasignado)
+                    interesa, motivo, auto = analizar_cazador(info, titulo_texto)
+
+                    if not interesa:
+                        continue
 
                     if auto:
                         btn = card.query_selector("button:has-text('CONFIRMAR')")
                         if btn:
                             btn.click()
-                            page.wait_for_timeout(3000)
-                            send(f"🎯 *CONFIRMADO:* {titulo_texto}\n👤 {info['puesto']}\n📊 Horario: {info['mins_entrada']//60}:{info['mins_entrada']%60:02d}")
+                            page.wait_for_timeout(2500)
+                            send(f"🎯 *CONFIRMADO:* {titulo_texto}\n👤 {info['puesto']} - {info['turnos']}T\n✅ Filtro: {motivo}")
                     else:
-                        # Para cualquier otro evento (incluyendo Diablos o VIP manual)
-                        if motivo == "Evento Nuevo Disponible":
-                            send(f"🔔 *EVENTO DISPONIBLE:* {titulo_texto}")
-                        else:
-                            send(f"⚠️ *{motivo}*")
+                        emoji = "⚠️" if "REVISIÓN" in motivo else "🔔"
+                        hora_str = f"{info['mins_entrada']//60:02d}:{info['mins_entrada']%60:02d}"
+                        eventos_disponibles.append(f"{emoji} *{titulo_texto}*\n└ {info['puesto']} | {info['turnos']}T | {hora_str}")
+
+            if eventos_disponibles:
+                mensaje_final = "📋 *RESUMEN DE EVENTOS DISPONIBLES*\n\n" + "\n\n".join(eventos_disponibles)
+                send(mensaje_final)
             
             browser.close()
     except Exception as e:
@@ -147,4 +163,4 @@ if __name__ == "__main__":
     threading.Thread(target=monitor_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
-    
+            
