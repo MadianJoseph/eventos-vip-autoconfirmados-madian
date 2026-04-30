@@ -232,6 +232,15 @@ def escanear_eventos(page) -> list[dict]:
                 datos = extraer_datos_tabla(tabla_html_elem.inner_html())
                 datos["titulo"] = datos["titulo"] or titulo_texto
 
+                # Detectar badge PREASIGNADO dentro de la tarjeta
+                badge_preasignado = card.query_selector(".badge")
+                datos["preasignado"] = (
+                    badge_preasignado is not None
+                    and "PREASIGNADO" in badge_preasignado.inner_text().upper()
+                )
+                if datos["preasignado"]:
+                    log.info(f"     🏷 Badge PREASIGNADO detectado en: {titulo_texto}")
+
                 # Consultar filtros externos
                 accion, motivo = analizar_evento(datos)
                 log.info(f"     → Filtro: {accion} | {motivo}")
@@ -247,10 +256,12 @@ def escanear_eventos(page) -> list[dict]:
                         confirmado = True
                         log.info(f"     ✅ CONFIRMADO: {titulo_texto}")
                         # Notificación inmediata al confirmar
-                        hora_str = f"{datos['mins_entrada']//60:02d}:{datos['mins_entrada']%60:02d}"
+                        hora_str  = f"{datos['mins_entrada']//60:02d}:{datos['mins_entrada']%60:02d}"
+                        badge_txt = "🏷 _PREASIGNADO_\n" if datos.get("preasignado") else ""
                         enviar_telegram(
                             f"🎯 *CONFIRMADO AUTOMÁTICAMENTE*\n\n"
                             f"📌 *{titulo_texto}*\n"
+                            f"{badge_txt}"
                             f"👤 Puesto: {datos['puesto']}\n"
                             f"🏟 Lugar: {datos['lugar']}\n"
                             f"⏰ Entrada: {hora_str} | Turnos: {datos['turnos']}\n"
